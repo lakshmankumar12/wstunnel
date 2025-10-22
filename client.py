@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import sys
 import asyncio
 import logging
 import argparse
@@ -175,6 +176,45 @@ def update_url_with_passwd(url, passwd):
     url = url._replace(query = urlencode({'t': passwd}))
     return urlunparse(url)
 
+class StdioServer():
+    def __init__(self, loop, uri, certfile, client_cert, idle_timeout, compress, watchdog_server):
+        self.loop = loop
+        self.args = [uri, certfile, client_cert, idle_timeout, compress, watchdog_server]
+        self.base = None
+
+    async def run_forever(self):
+
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await self.loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+        while True:
+            # Read a fixed size of data, you can adjust the size as needed
+            data = await reader.read(1024)
+            if not data:
+                await asyncio.sleep(1)
+                self.loop.stop()
+                sys.exit(1)
+            self.data_received(data)
+
+    def data_received(self, data):
+        if self.base is None:
+            self.base = BaseServer("stdio",
+                                   self.write_to_transport,
+                                   self.upstream_lost,
+                                   *self.args
+                                  )
+        self.base.data_received(data)
+
+    def write_to_transport(self, data, addr):
+        sys.stdout.buffer.write(data)
+        sys.stdout.flush()
+
+    def upstream_lost(self, peername):
+        logger.info(f'upstream lost')
+        self.loop.stop()
+        sys.exit(1)
+
 async def main(args):
     protocol, local_addr = args.listen.split('://', maxsplit=1)
     local_addr = local_addr.split(':', maxsplit=1)
@@ -201,6 +241,14 @@ async def main(args):
             await loop.create_future() # Serve forever
         finally:
             transport.close()
+    elif protocol == 'stdio':
+        server = StdioServer(loop, uri,
+                              args.ca_certs,
+                              args.client_cert,
+                              args.idle_timeout,
+                              compress,
+                              watchdog_server)
+        await server.run_forever()
     else:
         server = await loop.create_server(lambda: TcpServer(uri,
                                                             args.ca_certs,
@@ -216,7 +264,7 @@ async def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Wstunnel client')
     parser.add_argument('--url', type=str, metavar='ws[s]://HOSTNAME:PORT/PATH', required=True, help='URL')
-    parser.add_argument('-l', '--listen', type=str, metavar='(tcp|udp)://IP:PORT', required=True, help='Listen address')
+    parser.add_argument('-l', '--listen', type=str, metavar='(tcp|udp)://IP:PORT|(stdio://_:0)', required=True, help='Listen address')
     parser.add_argument('-p', '--passwd', type=str, metavar='FILE', help='File containing one line of password to authenticate to the proxy server')
     parser.add_argument('-i', '--idle-timeout', type=int, default=120, help='Seconds to wait before an idle connection being killed')
     parser.add_argument('-s', '--ca-certs', type=str, metavar='ca.pem', help="Server CA certificates in PEM format to verify against")
